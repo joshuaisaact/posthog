@@ -51,7 +51,6 @@ import {
 import { Conversation, ConversationDetail, ConversationStatus, ConversationType } from '~/types'
 
 import { EnhancedToolCall, getToolCallDescriptionAndWidget } from './Thread'
-import { APPROVAL_MESSAGES } from './approvalOperationUtils'
 import { ToolRegistration } from './max-constants'
 import { MaxBillingContext, MaxBillingContextSubscriptionLevel, maxBillingContextLogic } from './maxBillingContextLogic'
 import { maxGlobalLogic } from './maxGlobalLogic'
@@ -161,6 +160,7 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                 conversation?: string
                 contextual_tools?: Record<string, any>
                 ui_context?: any
+                approval_status?: 'approved' | 'rejected' | null
             },
             generationAttempt: number,
             addToThread: boolean = true
@@ -591,7 +591,12 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
             if (values.pendingApprovalProposalId && values.conversationId) {
                 const proposalIdToReject = values.pendingApprovalProposalId
                 try {
-                    await api.conversations.rejectOperation(values.conversationId, proposalIdToReject)
+                    // Pass the user's new message as feedback for the rejection
+                    await api.conversations.rejectOperation(
+                        values.conversationId,
+                        proposalIdToReject,
+                        prompt ? `User continued conversation with: ${prompt}` : undefined
+                    )
                 } catch {
                     // Ignore errors - operation may have already been resolved
                 }
@@ -764,18 +769,37 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
             actions.clearPendingApproval()
             // Persist the approved status for the card to display
             actions.setResolvedApprovalStatus(proposalId, 'approved')
-            // Continue the conversation with a visible approval message
-            // The agent will receive this and call the tool again,
-            // which will find the approved operation and execute it
-            actions.askMax(APPROVAL_MESSAGES.approved)
+            // Resume the conversation using approval_status to signal resume
+            actions.streamConversation(
+                {
+                    agent_mode: values.agentMode,
+                    content: null,
+                    conversation: values.conversationId,
+                    contextual_tools: Object.fromEntries(values.tools.map((tool) => [tool.identifier, tool.context])),
+                    approval_status: 'approved',
+                },
+                0,
+                false // Don't add to thread - no human message to show
+            )
         },
         continueAfterRejection: ({ proposalId }) => {
             // Clear the pending approval state
             actions.clearPendingApproval()
             // Persist the rejected status for the card to display
             actions.setResolvedApprovalStatus(proposalId, 'rejected')
-            // Continue the conversation with a visible rejection message
-            actions.askMax(APPROVAL_MESSAGES.rejected)
+            // Resume the conversation using approval_status to signal resume
+            // The tool will find the rejected operation and return an appropriate message to the agent
+            actions.streamConversation(
+                {
+                    agent_mode: values.agentMode,
+                    content: null,
+                    conversation: values.conversationId,
+                    contextual_tools: Object.fromEntries(values.tools.map((tool) => [tool.identifier, tool.context])),
+                    approval_status: 'rejected',
+                },
+                0,
+                false // Don't add to thread - no human message to show
+            )
         },
     })),
 
@@ -788,10 +812,23 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
         effectiveApprovalStatuses: [
             (s) => [s.resolvedApprovalStatuses, s.conversation],
             (resolved, conversation): Record<string, 'approved' | 'rejected' | 'auto_rejected'> => {
-                const backendDecisions =
+                const rawDecisions =
                     typeof conversation?.approval_decisions === 'object' && conversation.approval_decisions !== null
                         ? conversation.approval_decisions
                         : {}
+
+                // Normalize backend decisions - extract status from object format
+                const backendDecisions: Record<string, 'approved' | 'rejected' | 'auto_rejected'> = {}
+                for (const [proposalId, decision] of Object.entries(rawDecisions)) {
+                    if (typeof decision === 'string') {
+                        // Legacy string format
+                        backendDecisions[proposalId] = decision as 'approved' | 'rejected' | 'auto_rejected'
+                    } else if (typeof decision === 'object' && decision !== null && 'status' in decision) {
+                        // New object format
+                        backendDecisions[proposalId] = decision.status as 'approved' | 'rejected' | 'auto_rejected'
+                    }
+                }
+
                 return {
                     ...backendDecisions,
                     ...resolved,

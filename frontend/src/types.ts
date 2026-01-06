@@ -6010,7 +6010,13 @@ export interface Conversation {
     slack_thread_key?: string | null
     slack_workspace_domain?: string | null
     is_internal?: boolean
-    approval_decisions?: Record<string, 'approved' | 'rejected'>
+    approval_decisions?: Record<
+        string,
+        | 'approved'
+        | 'rejected'
+        | 'auto_rejected'
+        | { status: 'approved' | 'rejected' | 'auto_rejected'; tool_name?: string; preview?: string }
+    >
 }
 
 export interface ConversationDetail extends Conversation {

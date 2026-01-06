@@ -117,11 +117,13 @@ class ChatAgentRunner(BaseAgentRunner):
 
     def get_resumed_state(self) -> PartialAssistantState:
         if not self._latest_message:
-            return PartialAssistantState(messages=[])
+            new_state = PartialAssistantState(messages=[], graph_status="resumed", query_generation_retry_count=0)
+            if self._selected_agent_mode:
+                new_state.agent_mode = self._selected_agent_mode
+            return new_state
         new_state = PartialAssistantState(
             messages=[self._latest_message], graph_status="resumed", query_generation_retry_count=0
         )
-        # Only set the agent mode if it was explicitly set.
         if self._selected_agent_mode:
             new_state.agent_mode = self._selected_agent_mode
         return new_state

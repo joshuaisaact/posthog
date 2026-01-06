@@ -267,28 +267,56 @@ class BaseAgentRunner(ABC):
 
                 # Check if the assistant has requested help.
                 state = await self._graph.aget_state(config)
+
+                # If graph completed successfully (no pending nodes) and we were previously interrupted,
+                # reset graph_status so the next message can start fresh instead of trying to resume.
+                if not state.next:
+                    current_state = validate_state_update(state.values, self._state_type)
+                    if current_state.graph_status == "interrupted":
+                        await self._graph.aupdate_state(
+                            config,
+                            self._partial_state_type(graph_status=""),
+                        )
+
                 if state.next:
                     interrupt_messages = []
+                    root_tool_call_id = None
                     for task in state.tasks:
                         for interrupt in task.interrupts:
                             if interrupt.value is None:
                                 continue  # Skip None interrupts (used by create_form)
-                            interrupt_message = (
-                                AssistantMessage(content=interrupt.value, id=str(uuid4()))
-                                if isinstance(interrupt.value, str)
-                                else interrupt.value
-                            )
+                            # Reconstruct interrupt message based on its type
+                            if isinstance(interrupt.value, str):
+                                interrupt_message = AssistantMessage(content=interrupt.value, id=str(uuid4()))
+                            elif isinstance(interrupt.value, dict):
+                                # Check for new format with message and root_tool_call_id
+                                if "message" in interrupt.value and "root_tool_call_id" in interrupt.value:
+                                    interrupt_message = AssistantToolCallMessage(**interrupt.value["message"])
+                                    root_tool_call_id = interrupt.value["root_tool_call_id"]
+                                    # Store approval card data for persistence on page reload
+                                    await self._store_approval_card_data(interrupt.value["message"])
+                                elif "tool_call_id" in interrupt.value:
+                                    # Legacy format: Reconstruct AssistantToolCallMessage from serialized dict
+                                    interrupt_message = AssistantToolCallMessage(**interrupt.value)
+                                else:
+                                    interrupt_message = interrupt.value
+                            else:
+                                interrupt_message = interrupt.value
                             interrupt_messages.append(interrupt_message)
                             yield AssistantEventType.MESSAGE, interrupt_message
 
-                    await self._graph.aupdate_state(
-                        config,
-                        self._partial_state_type(
-                            messages=interrupt_messages,
-                            # LangGraph by some reason doesn't store the interrupt exceptions in checkpoints.
-                            graph_status="interrupted",
-                        ),
+                    # Build the state update, including root_tool_call_id if present.
+                    # IMPORTANT: Don't add interrupt_messages to state.messages - they're already yielded to frontend,
+                    # and adding them would make them the "last message" which breaks router logic
+                    # (router checks last_message for tool_calls to decide routing).
+                    state_update = self._partial_state_type(
+                        # LangGraph by some reason doesn't store the interrupt exceptions in checkpoints.
+                        graph_status="interrupted",
                     )
+                    if root_tool_call_id is not None:
+                        state_update.root_tool_call_id = root_tool_call_id
+
+                    await self._graph.aupdate_state(config, state_update)
             except GraphRecursionError:
                 recursion_limit_message = AssistantMessage(
                     content="I've reached the maximum number of steps. Would you like me to continue?",
@@ -385,12 +413,14 @@ class BaseAgentRunner(ABC):
                     self._stream_processor.mark_id_as_streamed(message.id)
 
             # If the graph previously hasn't reset the state, it is an interrupt. We resume from the point of interruption.
-            if snapshot.next and self._latest_message and saved_state.graph_status == "interrupted":
+            # Note: For approval flows, we resume without a message (just approval_status), so don't require _latest_message
+            # We rely on graph_status rather than snapshot.next because aupdate_state may clear snapshot.next
+            if saved_state.graph_status == "interrupted":
                 self._state = saved_state
-                await self._graph.aupdate_state(
-                    config,
-                    self.get_resumed_state(),
-                )
+                # At interrupt time, we used as_node=parent_node to set up the checkpoint.
+                # Now when we call astream(None), LangGraph will run the router from parent_node,
+                # which will route to the interrupted node (tools node) based on the tool calls in state.
+                # We don't call aupdate_state here - the state is already correct from interrupt time.
                 # Return None to indicate that we want to continue the execution from the interrupted point.
                 return None
 
@@ -483,6 +513,60 @@ class BaseAgentRunner(ABC):
                 "$groups": event_usage.groups(team=self._team),
             },
         )
+
+    async def _store_approval_card_data(self, message_data: dict) -> None:
+        """
+        Store approval card data in conversation.approval_decisions for persistence on page reload.
+
+        The approval card message is yielded to frontend during streaming but not stored in
+        LangGraph state (to avoid affecting router logic). We store the card metadata here
+        so the serializer can reconstruct the card message on page reload.
+        """
+        ui_payload = message_data.get("ui_payload", {})
+        tool_call_id = message_data.get("tool_call_id")
+        message_id = message_data.get("id")
+        logger.info(
+            "_store_approval_card_data called",
+            ui_payload=ui_payload,
+            tool_call_id=tool_call_id,
+            message_id=message_id,
+        )
+        if not ui_payload:
+            return
+
+        # Extract the DangerousOperationResponse from ui_payload
+        for tool_name, payload in ui_payload.items():
+            if not isinstance(payload, dict):
+                continue
+            proposal_id = payload.get("proposal_id")
+            preview = payload.get("preview")
+            logger.info(
+                "Processing approval card", tool_name=tool_name, proposal_id=proposal_id, has_preview=bool(preview)
+            )
+            if not proposal_id or not preview:
+                continue
+
+            # Only store if not already in approval_decisions (don't overwrite resolved status)
+            if proposal_id in self._conversation.approval_decisions:
+                logger.info("Skipping - already in approval_decisions", proposal_id=proposal_id)
+                continue
+
+            # Store with "pending" status - will be updated to approved/rejected by API endpoints
+            # Store tool_call_id and message_id for correct positioning and reconstruction
+            self._conversation.approval_decisions[proposal_id] = {
+                "status": "pending",
+                "tool_name": tool_name,
+                "preview": preview,
+                "tool_call_id": tool_call_id,
+                "message_id": message_id,
+            }
+            await self._conversation.asave(update_fields=["approval_decisions"])
+            logger.info(
+                "Stored approval card data",
+                proposal_id=proposal_id,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+            )
 
     def _get_form_response_message(self, saved_state: AssistantMaxGraphState) -> AssistantToolCallMessage | None:
         """

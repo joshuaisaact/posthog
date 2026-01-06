@@ -1,11 +1,10 @@
 import { useActions, useValues } from 'kea'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { IconCheck, IconWarning, IconX } from '@posthog/icons'
 import { LemonButton } from '@posthog/lemon-ui'
 
 import api from 'lib/api'
-import { lemonToast } from 'lib/lemon-ui/LemonToast/LemonToast'
 
 import { ApprovalCardStatus, DangerousOperationResponse } from '~/queries/schema/schema-assistant-messages'
 
@@ -18,59 +17,65 @@ export { isDangerousOperationResponse, normalizeDangerousOperationResponse } fro
 interface DangerousOperationApprovalCardProps {
     operation: DangerousOperationResponse
     conversationId: string
-    initialStatus?: 'approved' | 'rejected' | 'auto_rejected'
     onResolved?: (approved: boolean) => void
 }
 
 export function DangerousOperationApprovalCard({
     operation,
     conversationId,
-    initialStatus,
     onResolved,
 }: DangerousOperationApprovalCardProps): JSX.Element {
-    const [status, setStatus] = useState<ApprovalCardStatus>(initialStatus ?? 'pending')
+    const [status, setStatus] = useState<ApprovalCardStatus>('pending')
+
     const { tabId } = useValues(maxLogic)
+    const { effectiveApprovalStatuses } = useValues(maxThreadLogic({ conversationId, tabId }))
     const { continueAfterApproval, continueAfterRejection } = useActions(maxThreadLogic({ conversationId, tabId }))
+
+    // Sync status from Kea state (e.g., when user sends a new message and the operation is auto-rejected)
+    const resolvedStatus = effectiveApprovalStatuses[operation.proposalId]
+    useEffect(() => {
+        if (resolvedStatus) {
+            setStatus(resolvedStatus)
+        }
+    }, [resolvedStatus])
 
     const handleApprove = async (): Promise<void> => {
         setStatus('approving')
         try {
             // 1. Mark operation as approved in backend
-            await api.conversations.approveOperation(conversationId, operation.proposalId)
-            // 2. Update card status
+            const response = await api.conversations.approveOperation(conversationId, operation.proposalId)
+
+            // 2. Check if operation expired (already rejected on backend)
+            if (response.status === 'rejected') {
+                setStatus('expired')
+                // Continue conversation with rejection - agent will see it was rejected
+                continueAfterRejection(operation.proposalId)
+                onResolved?.(false)
+                return
+            }
+
+            // 3. Update card status
             setStatus('approved')
-            // 3. Continue conversation - agent will execute the approved operation
+            // 4. Continue conversation - agent will execute the approved operation
             continueAfterApproval(operation.proposalId)
             onResolved?.(true)
-        } catch (e: any) {
-            if (e.status === 404) {
-                setStatus('expired')
-                lemonToast.error('This operation has expired')
-            } else {
-                setStatus('pending')
-                lemonToast.error('Failed to approve operation')
-            }
+        } catch {
+            setStatus('pending')
         }
     }
 
     const handleReject = async (): Promise<void> => {
         setStatus('rejecting')
         try {
-            // 1. Delete the pending operation from backend
+            // 1. Mark operation as rejected in backend
             await api.conversations.rejectOperation(conversationId, operation.proposalId)
             // 2. Update card status
             setStatus('rejected')
             // 3. Continue conversation with rejection message
             continueAfterRejection(operation.proposalId)
             onResolved?.(false)
-        } catch (e: any) {
-            if (e.status === 404) {
-                setStatus('expired')
-                lemonToast.error('This operation has expired')
-            } else {
-                setStatus('pending')
-                lemonToast.error('Failed to reject operation')
-            }
+        } catch {
+            setStatus('pending')
         }
     }
 

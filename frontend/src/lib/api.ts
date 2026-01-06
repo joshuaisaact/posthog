@@ -4759,6 +4759,7 @@ const api = {
                 conversation?: string | null
                 trace_id: string
                 agent_mode?: AgentMode | null
+                approval_status?: 'approved' | 'rejected' | null
             },
             options?: ApiMethodOptions
         ): Promise<Response> {
@@ -4788,8 +4789,11 @@ const api = {
             return new ApiRequest().conversation(conversationId).withAction(`operations/${proposalId}/approve`).create()
         },
 
-        rejectOperation(conversationId: string, proposalId: string): Promise<{ status: string }> {
-            return new ApiRequest().conversation(conversationId).withAction(`operations/${proposalId}/reject`).create()
+        rejectOperation(conversationId: string, proposalId: string, feedback?: string): Promise<{ status: string }> {
+            return new ApiRequest()
+                .conversation(conversationId)
+                .withAction(`operations/${proposalId}/reject`)
+                .create({ data: feedback ? { feedback } : undefined })
         },
     },
 

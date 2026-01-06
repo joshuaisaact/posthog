@@ -15,7 +15,7 @@ from posthog.sync import database_sync_to_async
 from ee.hogai.artifacts.manager import ArtifactManager, DatabaseArtifactResult, ModelArtifactResult, StateArtifactResult
 from ee.hogai.context.dashboard.context import DashboardContext, DashboardInsightContext
 from ee.hogai.context.insight.context import InsightContext
-from ee.hogai.tool import MaxTool, ToolMessagesArtifact
+from ee.hogai.tool import DangerousOperationResponse, MaxTool, ToolMessagesArtifact
 from ee.hogai.tools.upsert_dashboard.prompts import (
     CREATE_NO_INSIGHTS_PROMPT,
     DASHBOARD_NOT_FOUND_PROMPT,
@@ -96,8 +96,13 @@ class UpsertDashboardTool(MaxTool):
             return action.replace_insights is True or bool(action.update_insight_ids)
         return False
 
-    async def _create_dangerous_operation_response(self, **kwargs) -> tuple[str, dict] | None:
-        """Override to fetch dashboard details for a richer preview."""
+    async def _create_dangerous_operation_response(self, **kwargs) -> tuple[str, DangerousOperationResponse]:
+        """
+        Override to fetch dashboard details for a richer preview.
+
+        Returns:
+            Tuple of ("", DangerousOperationResponse).
+        """
         import uuid
 
         from ee.hogai.pending_operations import store_pending_operation
@@ -205,8 +210,6 @@ class UpsertDashboardTool(MaxTool):
                 payload={"action": action.model_dump()},
             )
 
-        from ee.hogai.tool import DangerousOperationResponse
-
         response = DangerousOperationResponse(
             proposal_id=proposal_id,
             tool_name=self.name,
@@ -214,15 +217,8 @@ class UpsertDashboardTool(MaxTool):
             payload={"action": action.model_dump()},
         )
 
-        # Stop and wait
-        stop_message = (
-            "STOP. This operation requires explicit user approval before proceeding. "
-            "The user is now seeing an approval dialog. Do NOT continue, do NOT summarize, do NOT say 'Done'. "
-            "Wait silently for the user's response. "
-            "When the user approves, call this tool again with the same arguments - it will execute normally."
-        )
-
-        return stop_message, response.model_dump()
+        # Return marker tuple - executor will detect DangerousOperationResponse and raise NodeInterrupt
+        return ("", response)
 
     async def _arun_impl(self, action: UpsertDashboardAction) -> tuple[str, ToolMessagesArtifact | None]:
         if isinstance(action, CreateDashboardToolArgs):
@@ -419,7 +415,6 @@ class UpsertDashboardTool(MaxTool):
                 if old_short_id in existing_tiles_by_short_id:
                     old_tile = existing_tiles_by_short_id[old_short_id]
                     if not old_tile.deleted:
-                        # Update the tile in place
                         old_tile.insight = new_insight
                         old_tile.save(update_fields=["insight"])
 
