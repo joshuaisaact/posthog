@@ -1,4 +1,5 @@
 import { BindLogic, BuiltLogic, Logic, LogicWrapper, useActions, useMountedLogic, useValues } from 'kea'
+import { useEffect } from 'react'
 
 import { LemonBanner, LemonButton } from '@posthog/lemon-ui'
 
@@ -9,18 +10,21 @@ import { useAttachedLogic } from 'lib/logic/scenes/useAttachedLogic'
 import { InsightPageHeader } from 'scenes/insights/InsightPageHeader'
 import { insightSceneLogic } from 'scenes/insights/insightSceneLogic'
 import { ReloadInsight } from 'scenes/saved-insights/ReloadInsight'
+import { filterTestAccountsDefaultsLogic } from 'scenes/settings/environment/filterTestAccountDefaultsLogic'
 import { urls } from 'scenes/urls'
 
 import { SceneContent } from '~/layout/scenes/components/SceneContent'
 import { Query } from '~/queries/Query/Query'
+import { getDefaultQuery } from '~/queries/nodes/InsightViz/utils'
 import { Node } from '~/queries/schema/schema-general'
 import { containsHogQLQuery, isInsightVizNode } from '~/queries/utils'
-import { InsightShortId, ItemMode } from '~/types'
+import { InsightShortId, InsightType, ItemMode } from '~/types'
 
 import { teamLogic } from '../teamLogic'
 import { InsightsNav } from './InsightNav/InsightsNav'
 import { insightCommandLogic } from './insightCommandLogic'
 import { insightDataLogic } from './insightDataLogic'
+import { createEmptyInsight } from './insightLogic'
 import { insightLogic } from './insightLogic'
 
 export interface InsightAsSceneProps {
@@ -31,22 +35,67 @@ export interface InsightAsSceneProps {
 
 export function InsightAsScene({ insightId, attachTo, tabId }: InsightAsSceneProps): JSX.Element | null {
     // insightSceneLogic
-    const { insightMode, insight, filtersOverride, variablesOverride, hasOverrides, freshQuery } =
-        useValues(insightSceneLogic)
+    const {
+        insightMode,
+        insight: sceneInsight,
+        filtersOverride,
+        variablesOverride,
+        hasOverrides,
+        freshQuery,
+    } = useValues(insightSceneLogic)
     const { currentTeamId } = useValues(teamLogic)
+    const { filterTestAccountsDefault } = useValues(filterTestAccountsDefaultsLogic)
 
-    // insightLogic
+    // Determine if this is a new insight
+    const isNewInsight = insightId === 'new' || (insightId && insightId.startsWith('new-'))
+    // Don't use cached insight if we're creating a new insight, even if insightSceneLogic has stale data
+    // If the insight is unsaved, use it if we have overrides and the IDs match (to preserve unsaved work)
+    // If the insight is saved, only use it if it's not a new insight, we have overrides, and the IDs match
+    const matchesId = hasOverrides && sceneInsight?.short_id === insightId
+    const cachedInsightToUse = matchesId && (!sceneInsight?.saved || !isNewInsight) ? sceneInsight : null
+
     const logic = insightLogic({
         dashboardItemId: insightId || `new-${tabId}`,
         tabId,
-        // don't use cached insight if we have overrides
-        cachedInsight: hasOverrides && insight?.short_id === insightId ? insight : null,
+        // don't use cached insight if we have overrides or if we're creating a new insight
+        cachedInsight: cachedInsightToUse,
         filtersOverride,
         variablesOverride,
     })
-    const { insightProps, accessDeniedToInsight } = useValues(logic)
+    const { insightProps, accessDeniedToInsight, insight } = useValues(logic)
+    const { setInsight } = useActions(logic)
 
-    // insightDataLogic
+    // Reset insight when navigating to a new insight if the logic instance has stale data from a saved insight
+    // Don't reset if the insight is unsaved - preserve user's work when navigating away and back
+    useEffect(() => {
+        if (
+            isNewInsight &&
+            insight?.short_id &&
+            !insight.short_id.startsWith('new-') &&
+            insight.short_id !== 'new' &&
+            insight.saved
+        ) {
+            // The logic instance has a saved insight's data, but we're on a new insight - reset it
+            // Only reset if the insight was saved (insight.saved === true)
+            const query = getDefaultQuery(InsightType.TRENDS, filterTestAccountsDefault)
+            setInsight(
+                {
+                    ...createEmptyInsight(insightId as InsightShortId),
+                    query,
+                },
+                {
+                    fromPersistentApi: false,
+                    overrideQuery: true,
+                }
+            )
+        }
+    }, [insightId, isNewInsight, insight?.short_id, insight?.saved, setInsight, filterTestAccountsDefault])
+
+    // Mount logics first to ensure they're initialized
+    useMountedLogic(insightCommandLogic(insightProps))
+    useAttachedLogic(logic, attachTo)
+    useAttachedLogic(insightDataLogic(insightProps), attachTo)
+
     const { query, showQueryEditor, showDebugPanel } = useValues(insightDataLogic(insightProps))
     const { setQuery: setInsightQuery } = useActions(insightDataLogic(insightProps))
 
@@ -56,11 +105,6 @@ export function InsightAsScene({ insightId, attachTo, tabId }: InsightAsScenePro
         enabled: Boolean(currentTeamId && insight?.short_id && insight?.saved && !accessDeniedToInsight),
         deps: [currentTeamId, insight?.short_id, insight?.saved, accessDeniedToInsight],
     })
-
-    // other logics
-    useMountedLogic(insightCommandLogic(insightProps))
-    useAttachedLogic(logic, attachTo) // insightLogic(insightProps)
-    useAttachedLogic(insightDataLogic(insightProps), attachTo)
 
     const actuallyShowQueryEditor = insightMode === ItemMode.Edit && showQueryEditor
 
