@@ -305,10 +305,10 @@ class BaseAgentRunner(ABC):
                             interrupt_messages.append(interrupt_message)
                             yield AssistantEventType.MESSAGE, interrupt_message
 
-                    # Build the state update, including root_tool_call_id if present.
-                    # IMPORTANT: Don't add interrupt_messages to state.messages - they're already yielded to frontend,
-                    # and adding them would make them the "last message" which breaks router logic
-                    # (router checks last_message for tool_calls to decide routing).
+                    # Build the state update - DON'T add interrupt_messages to state.messages!
+                    # Adding them would make the approval card the "last message", which breaks
+                    # the router (it checks last_message for tool_calls to decide routing).
+                    # The interrupt messages are already yielded to frontend above.
                     state_update = self._partial_state_type(
                         # LangGraph by some reason doesn't store the interrupt exceptions in checkpoints.
                         graph_status="interrupted",
@@ -316,7 +316,9 @@ class BaseAgentRunner(ABC):
                     if root_tool_call_id is not None:
                         state_update.root_tool_call_id = root_tool_call_id
 
-                    await self._graph.aupdate_state(config, state_update)
+                    # Use as_node="root" so that when we resume, the router runs from ROOT
+                    # and routes back to ROOT_TOOLS based on the tool_calls in state.
+                    await self._graph.aupdate_state(config, state_update, as_node="root")
             except GraphRecursionError:
                 recursion_limit_message = AssistantMessage(
                     content="I've reached the maximum number of steps. Would you like me to continue?",
@@ -414,13 +416,18 @@ class BaseAgentRunner(ABC):
 
             # If the graph previously hasn't reset the state, it is an interrupt. We resume from the point of interruption.
             # Note: For approval flows, we resume without a message (just approval_status), so don't require _latest_message
-            # We rely on graph_status rather than snapshot.next because aupdate_state may clear snapshot.next
-            if saved_state.graph_status == "interrupted":
+            # We check snapshot.next to ensure there are pending nodes to resume
+            logger.info(
+                "Checking resume conditions",
+                snapshot_next=snapshot.next,
+                graph_status=saved_state.graph_status,
+                has_latest_message=self._latest_message is not None,
+            )
+            if snapshot.next and saved_state.graph_status == "interrupted":
                 self._state = saved_state
-                # At interrupt time, we used as_node=parent_node to set up the checkpoint.
-                # Now when we call astream(None), LangGraph will run the router from parent_node,
-                # which will route to the interrupted node (tools node) based on the tool calls in state.
-                # We don't call aupdate_state here - the state is already correct from interrupt time.
+                logger.info("Resuming from interrupted state", snapshot_next=snapshot.next)
+                # Don't call aupdate_state here - it would create a new checkpoint with next=[]
+                # which clears the pending nodes. Just return None to resume from the existing checkpoint.
                 # Return None to indicate that we want to continue the execution from the interrupted point.
                 return None
 
@@ -561,11 +568,14 @@ class BaseAgentRunner(ABC):
                 "message_id": message_id,
             }
             await self._conversation.asave(update_fields=["approval_decisions"])
+            # Verify it was actually saved
+            await self._conversation.arefresh_from_db(fields=["approval_decisions"])
             logger.info(
                 "Stored approval card data",
                 proposal_id=proposal_id,
                 tool_name=tool_name,
                 tool_call_id=tool_call_id,
+                saved_decisions=self._conversation.approval_decisions,
             )
 
     def _get_form_response_message(self, saved_state: AssistantMaxGraphState) -> AssistantToolCallMessage | None:
