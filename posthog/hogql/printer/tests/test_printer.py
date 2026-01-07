@@ -1936,7 +1936,7 @@ class TestPrinter(BaseTest):
             "hogql_val_5": [1, 0],
         }
 
-    @patch("posthog.hogql.printer.get_materialized_column_for_property")
+    @patch("posthog.hogql.printer.base.get_materialized_column_for_property")
     def test_ai_trace_id_optimizations(self, mock_get_mat_col):
         """Test that $ai_trace_id gets special treatment for bloom filter index optimization"""
 
@@ -1999,7 +1999,7 @@ class TestPrinter(BaseTest):
             sql,
         )
 
-    @patch("posthog.hogql.printer.get_materialized_column_for_property")
+    @patch("posthog.hogql.printer.base.get_materialized_column_for_property")
     def test_ai_session_id_optimizations(self, mock_get_mat_col):
         """Test that $ai_session_id gets special treatment for bloom filter index optimization"""
 
@@ -2462,7 +2462,7 @@ class TestPrinter(BaseTest):
 
     def test_get_survey_response(self):
         # Test with just question index
-        with patch("posthog.hogql.printer.get_survey_response_clickhouse_query") as mock_get_survey_response:
+        with patch("posthog.hogql.printer.base.get_survey_response_clickhouse_query") as mock_get_survey_response:
             mock_get_survey_response.return_value = "MOCKED SQL FOR SURVEY RESPONSE"
 
             printed = self._print(
@@ -2477,7 +2477,7 @@ class TestPrinter(BaseTest):
             self.assertIn("MOCKED SQL FOR SURVEY RESPONSE", printed)
 
         # Test with question index and specific ID
-        with patch("posthog.hogql.printer.get_survey_response_clickhouse_query") as mock_get_survey_response:
+        with patch("posthog.hogql.printer.base.get_survey_response_clickhouse_query") as mock_get_survey_response:
             mock_get_survey_response.return_value = "MOCKED SQL FOR SURVEY RESPONSE WITH ID"
 
             printed = self._print(
@@ -2492,7 +2492,7 @@ class TestPrinter(BaseTest):
             self.assertIn("MOCKED SQL FOR SURVEY RESPONSE WITH ID", printed)
 
         # Test with multiple choice question
-        with patch("posthog.hogql.printer.get_survey_response_clickhouse_query") as mock_get_survey_response:
+        with patch("posthog.hogql.printer.base.get_survey_response_clickhouse_query") as mock_get_survey_response:
             mock_get_survey_response.return_value = "MOCKED SQL FOR MULTIPLE CHOICE SURVEY RESPONSE"
 
             printed = self._print(
@@ -2505,7 +2505,7 @@ class TestPrinter(BaseTest):
 
     def test_unique_survey_submissions_filter(self):
         with patch(
-            "posthog.hogql.printer.filter_survey_sent_events_by_unique_submission"
+            "posthog.hogql.printer.base.filter_survey_sent_events_by_unique_submission"
         ) as mock_filter_survey_sent_events_by_unique_submission:
             mock_filter_survey_sent_events_by_unique_submission.return_value = (
                 "MOCKED SQL FOR UNIQUE SURVEY SUBMISSIONS FILTER"
