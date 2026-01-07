@@ -5786,6 +5786,7 @@ export type HogFunctionSubTemplateType = Pick<
     sub_template_id: HogFunctionSubTemplateIdType
     name?: string
     description?: string
+    flag?: string
 }
 
 export type HogFunctionTemplateType = Pick<
